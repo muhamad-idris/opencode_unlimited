@@ -99,6 +99,97 @@ def is_ip_block_error(body: bytes) -> bool:
     )
 
 
+def assemble_streamed_completion(body: bytes) -> Dict[str, Any]:
+    text = body.decode("utf-8", errors="replace")
+    data_lines = [line[5:].strip() for line in text.splitlines() if line.startswith("data:")]
+    if not data_lines:
+        result = json.loads(text)
+        if isinstance(result, dict):
+            return result
+        raise ValueError("Upstream returned an invalid completion")
+
+    completion: Dict[str, Any] = {"object": "chat.completion"}
+    choices: Dict[int, Dict[str, Any]] = {}
+    tool_calls_by_choice: Dict[int, Dict[int, Dict[str, Any]]] = {}
+
+    for data in data_lines:
+        if data == "[DONE]":
+            break
+        try:
+            chunk = json.loads(data)
+        except json.JSONDecodeError as exc:
+            raise ValueError("Upstream returned an invalid stream event") from exc
+        if not isinstance(chunk, dict):
+            continue
+        if "error" in chunk:
+            return {"error": chunk["error"]}
+
+        for key in ("id", "created", "model", "system_fingerprint"):
+            if key in chunk:
+                completion[key] = chunk[key]
+        if chunk.get("usage") is not None:
+            completion["usage"] = chunk["usage"]
+
+        for streamed_choice in chunk.get("choices", []):
+            choice_index = streamed_choice.get("index", 0)
+            choice = choices.setdefault(
+                choice_index,
+                {
+                    "index": choice_index,
+                    "message": {"role": "assistant", "content": ""},
+                    "finish_reason": None,
+                },
+            )
+            message = choice["message"]
+            delta = streamed_choice.get("delta") or {}
+
+            for key, value in delta.items():
+                if key == "tool_calls":
+                    indexed_calls = tool_calls_by_choice.setdefault(choice_index, {})
+                    for streamed_call in value:
+                        call_index = streamed_call.get("index", 0)
+                        call = indexed_calls.setdefault(
+                            call_index, {"type": "function", "function": {}}
+                        )
+                        for call_key, call_value in streamed_call.items():
+                            if call_key == "index":
+                                continue
+                            if call_key == "function":
+                                function = call.setdefault("function", {})
+                                for function_key, function_value in call_value.items():
+                                    if isinstance(function_value, str):
+                                        function[function_key] = (
+                                            function.get(function_key, "") + function_value
+                                        )
+                                    else:
+                                        function[function_key] = function_value
+                            else:
+                                call[call_key] = call_value
+                elif isinstance(value, str) and isinstance(message.get(key, ""), str):
+                    message[key] = message.get(key, "") + value
+                elif isinstance(value, list) and isinstance(message.get(key), list):
+                    message[key].extend(value)
+                else:
+                    message[key] = value
+
+            if streamed_choice.get("finish_reason") is not None:
+                choice["finish_reason"] = streamed_choice["finish_reason"]
+
+    for choice_index, choice in choices.items():
+        indexed_calls = tool_calls_by_choice.get(choice_index)
+        if indexed_calls:
+            choice["message"]["tool_calls"] = [
+                indexed_calls[index] for index in sorted(indexed_calls)
+            ]
+            if choice["message"].get("content") == "":
+                choice["message"]["content"] = None
+        completion.setdefault("choices", []).append(choice)
+
+    if not completion.get("choices"):
+        raise ValueError("Upstream stream contained no completion choices")
+    return completion
+
+
 def load_zen_models() -> List[Dict[str, Any]]:
     """Return the model list from https://opencode.ai/zen/v1/models."""
     # Try cached file first (offline fallback)
@@ -218,7 +309,7 @@ def build_zen_headers() -> Dict[str, str]:
         "Connection": "keep-alive",
         "Accept": "*/*",
         "Host": "opencode.ai",
-        "Accept-Encoding": "gzip, deflate, br, zstd",
+        "Accept-Encoding": "identity",
     }
 
 
@@ -240,7 +331,6 @@ async def health():
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
-    # Read raw body 1:1 (no filtering)
     raw_body = await request.body()
     payload = {
         "model": "nemotron-3.5-super-vl-free",
@@ -281,12 +371,19 @@ async def chat_completions(request: Request):
                 }
             },
         )
-    raw_body = json.dumps(payload)
     # Resolve model alias (only change the model field)
     model_id = payload.get("model", REAL_MODEL)
     if model_id not in ZEN_MODEL_IDS:
         model_id = REAL_MODEL
     payload["model"] = model_id
+    if not stream:
+        payload["stream"] = True
+        stream_options = payload.get("stream_options")
+        if not isinstance(stream_options, dict):
+            stream_options = {}
+            payload["stream_options"] = stream_options
+        stream_options.setdefault("include_usage", True)
+    raw_body = json.dumps(payload)
 
     headers = build_zen_headers()
     proxy_url = get_proxy_url()
@@ -299,9 +396,14 @@ async def chat_completions(request: Request):
                 async with httpx.AsyncClient(
                     timeout=httpx.Timeout(120.0), proxy=proxy_url
                 ) as client:
-                    response = await client.post(
-                        ZEN_CHAT_URL, headers=headers, content=raw_body
-                    )
+                    async with client.stream(
+                        "POST", ZEN_CHAT_URL, headers=headers, content=raw_body
+                    ) as upstream_response:
+                        upstream_status = upstream_response.status_code
+                        upstream_content_type = upstream_response.headers.get(
+                            "content-type"
+                        )
+                        upstream_body = await upstream_response.aread()
             except httpx.RequestError as exc:
                 return JSONResponse(
                     status_code=502,
@@ -314,18 +416,46 @@ async def chat_completions(request: Request):
                     },
                 )
 
-            if is_ip_block_error(response.content) and proxy_url is not None:
+            if is_ip_block_error(upstream_body) and proxy_url is not None:
                 blacklist_proxy(proxy_url)
                 next_proxy = get_proxy_url(attempted_proxy_urls)
                 if next_proxy is not None:
                     proxy_url = next_proxy
                     continue
 
-            return Response(
-                content=response.content,
-                status_code=response.status_code,
-                media_type=response.headers.get("content-type"),
-            )
+            if upstream_status != 200:
+                return Response(
+                    content=upstream_body,
+                    status_code=upstream_status,
+                    media_type=upstream_content_type,
+                )
+
+            try:
+                completion = assemble_streamed_completion(upstream_body)
+            except ValueError as exc:
+                return JSONResponse(
+                    status_code=502,
+                    content={
+                        "error": {
+                            "message": str(exc),
+                            "type": "upstream_error",
+                            "code": 502,
+                        }
+                    },
+                )
+
+            if "error" in completion:
+                error = completion["error"]
+                error_code = error.get("code") if isinstance(error, dict) else None
+                try:
+                    error_status = int(error_code)
+                except (TypeError, ValueError):
+                    error_status = 502
+                if not 400 <= error_status < 600:
+                    error_status = 502
+                return JSONResponse(status_code=error_status, content=completion)
+
+            return JSONResponse(content=completion)
 
     async def stream_generator():
         current_proxy = proxy_url
