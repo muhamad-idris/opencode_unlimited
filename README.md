@@ -37,7 +37,7 @@ http://proxy.example:8080
 http://username:password@proxy.example:8080
 ```
 
-Jangan commit file daftar proxy karena URL dapat berisi kredensial. File ini sudah dikecualikan melalui `.gitignore`. Proxy yang terkena blokir disimpan sebagai hash di `proxy_blacklist.txt`, bukan sebagai URL. Bila daftar lokal tidak memiliki proxy valid, gateway menggunakan `ZEN_PROXY` jika disetel, atau konfigurasi proxy standar HTTPX.
+Repositori ini menyertakan `proxies.txt` sebagai sampel sementara. Karena URL proxy dapat berisi kredensial dan repositori ini publik, anggap kredensial sampel terekspos begitu dipush; jangan gunakan untuk produksi dan ganti file dengan proxy milik sendiri. File tetap ada di `.gitignore` agar daftar lokal baru tidak ikut ter-commit secara tidak sengaja. Proxy yang terkena blokir disimpan sebagai hash di `proxy_blacklist.txt`, bukan sebagai URL. Bila daftar lokal tidak memiliki proxy valid, gateway menggunakan `ZEN_PROXY` jika disetel, atau konfigurasi proxy standar HTTPX.
 
 ## Penggunaan
 
