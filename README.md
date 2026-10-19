@@ -30,7 +30,7 @@ Gateway tersedia di `http://localhost:8000`.
 
 ## Proxy
 
-Simpan URL proxy HTTP atau HTTPS, satu per baris, di `proxyscrape_premium_http_proxies.txt` yang berada di direktori yang sama dengan `ai_gateway.py`. Contoh format:
+Simpan URL proxy HTTP atau HTTPS, satu per baris, di `proxies.txt` yang berada di direktori yang sama dengan `ai_gateway.py`. Contoh format:
 
 ```text
 http://proxy.example:8080

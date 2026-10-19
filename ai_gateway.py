@@ -24,7 +24,7 @@ _ZEN_MODELS_CACHE_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "zen_models.json"
 )
 _PROXY_LIST_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "proxyscrape_premium_http_proxies.txt"
+    os.path.dirname(os.path.abspath(__file__)), "proxies.txt"
 )
 _PROXY_BLACKLIST_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "proxy_blacklist.txt"

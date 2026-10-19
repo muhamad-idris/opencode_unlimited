@@ -2,5 +2,5 @@
 __pycache__/
 *.py[cod]
 .env
-proxyscrape_premium_http_proxies.txt
+proxies.txt
 proxy_blacklist.txt
